@@ -31,6 +31,28 @@ import {
 // Track which threads we've already seen (for first-in-thread detection)
 const seenThreads = new Set<string>();
 
+/**
+ * Return a promise that resolves when the abort signal fires.
+ * Keeps the startAccount task alive (pending) until framework shutdown.
+ * Equivalent to the SDK's `waitUntilAbort` from `openclaw/plugin-sdk`.
+ */
+function waitUntilAbort(
+  signal?: AbortSignal,
+  onAbort?: () => void | Promise<void>,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const complete = () => {
+      Promise.resolve(onAbort?.()).then(() => resolve(), reject);
+    };
+    if (!signal) return; // stays pending forever
+    if (signal.aborted) {
+      complete();
+      return;
+    }
+    signal.addEventListener("abort", complete, { once: true });
+  });
+}
+
 // Module-level registry of active gateway cleanup functions keyed by accountId.
 // Allows startAccount to force-stop a stale connection if the framework calls
 // startAccount again without having called stop() first (e.g. in-process reloads).
@@ -740,7 +762,7 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
   gateway: {
     startAccount: async (
       ctx: ChannelGatewayContext<ResolvedAccount>,
-    ): Promise<{ stop: () => void }> => {
+    ): Promise<void> => {
       const { cfg, accountId, account, log, abortSignal } = ctx;
 
       if (!account.configured) {
@@ -896,19 +918,15 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
 
       activeGatewayCleanup.set(accountId, handleAbort);
 
-      if (abortSignal) {
-        abortSignal.addEventListener("abort", handleAbort, { once: true });
-      }
-
       log?.info?.(
         `[StreamChat] Gateway started for account "${accountId}"`,
       );
 
-      return {
-        stop: () => {
-          handleAbort();
-        },
-      };
+      // Keep the startAccount promise pending until the framework signals
+      // shutdown via the abort signal.  Without this the promise resolves
+      // immediately and the framework's auto-restart loop treats the
+      // gateway as "exited", causing a connect → disconnect cycle.
+      await waitUntilAbort(abortSignal, handleAbort);
     },
   },
 

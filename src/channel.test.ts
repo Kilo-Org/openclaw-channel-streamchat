@@ -152,6 +152,23 @@ function makeGatewayCtx(overrides?: Record<string, unknown>) {
   };
 }
 
+/**
+ * Start the gateway account without blocking on the lifecycle promise.
+ * `startAccount` now stays pending until abort, so we fire-and-forget the
+ * task, flush microtasks so all async setup (connectUser, queryChannels,
+ * listener registration) completes before the `waitUntilAbort` parks,
+ * and return `{ task, ctx }` — the caller must
+ * `ctx.abortController.abort(); await task` to tear down.
+ */
+async function startGateway(ctxOverrides?: Record<string, unknown>) {
+  const ctx = makeGatewayCtx(ctxOverrides);
+  const task = streamchatPlugin.gateway.startAccount(ctx as never);
+  // Flush enough microtasks for all mock-async setup steps to complete
+  // (connectUser → queryChannels → listener registration → waitUntilAbort)
+  await new Promise((r) => setTimeout(r, 0));
+  return { task, ctx };
+}
+
 function makeEvent(overrides?: Record<string, unknown>) {
   return {
     message: {
@@ -366,11 +383,14 @@ describe("streamchatPlugin", () => {
   // =======================================================================
 
   describe("gateway.startAccount", () => {
-    it("starts and returns stop function", async () => {
-      const ctx = makeGatewayCtx();
-      const result = await streamchatPlugin.gateway.startAccount(ctx as never);
-      expect(result).toHaveProperty("stop");
-      expect(typeof result.stop).toBe("function");
+    it("stays pending until abort signal fires", async () => {
+      const { task, ctx } = await startGateway();
+      // The promise should still be pending (status is running)
+      expect(ctx.getStatus().running).toBe(true);
+      // Abort to resolve the lifecycle promise
+      ctx.abortController.abort();
+      await task;
+      expect(ctx.getStatus().running).toBe(false);
     });
 
     it("throws when account not configured", async () => {
@@ -382,35 +402,36 @@ describe("streamchatPlugin", () => {
     });
 
     it("sets status to running after start", async () => {
-      const ctx = makeGatewayCtx();
-      await streamchatPlugin.gateway.startAccount(ctx as never);
+      const { task, ctx } = await startGateway();
       expect(ctx.getStatus().running).toBe(true);
+      ctx.abortController.abort();
+      await task;
     });
 
     it("registers message.new listener", async () => {
-      const ctx = makeGatewayCtx();
-      await streamchatPlugin.gateway.startAccount(ctx as never);
+      const { task, ctx } = await startGateway();
       expect(mockStreamChatClient.on).toHaveBeenCalledWith(
         "message.new",
         expect.any(Function),
       );
+      ctx.abortController.abort();
+      await task;
     });
 
     it("registers ai_indicator.stop listener", async () => {
-      const ctx = makeGatewayCtx();
-      await streamchatPlugin.gateway.startAccount(ctx as never);
+      const { task, ctx } = await startGateway();
       expect(mockStreamChatClient.on).toHaveBeenCalledWith(
         "ai_indicator.stop",
         expect.any(Function),
       );
+      ctx.abortController.abort();
+      await task;
     });
 
-    it("stop() removes listeners and disconnects", async () => {
-      const ctx = makeGatewayCtx();
-      const { stop } = await streamchatPlugin.gateway.startAccount(
-        ctx as never,
-      );
-      stop();
+    it("abort removes listeners and disconnects", async () => {
+      const { task, ctx } = await startGateway();
+      ctx.abortController.abort();
+      await task;
       expect(mockStreamChatClient.off).toHaveBeenCalledWith(
         "message.new",
         expect.any(Function),
@@ -421,28 +442,24 @@ describe("streamchatPlugin", () => {
       );
     });
 
-    it("stop() is idempotent", async () => {
-      const ctx = makeGatewayCtx();
-      const { stop } = await streamchatPlugin.gateway.startAccount(
-        ctx as never,
-      );
-      stop();
-      stop(); // Should not throw
+    it("abort is idempotent", async () => {
+      const { task, ctx } = await startGateway();
+      ctx.abortController.abort();
+      ctx.abortController.abort(); // Should not throw
+      await task;
     });
 
-    it("stop() updates status to running: false", async () => {
-      const ctx = makeGatewayCtx();
-      const { stop } = await streamchatPlugin.gateway.startAccount(
-        ctx as never,
-      );
-      stop();
+    it("abort updates status to running: false", async () => {
+      const { task, ctx } = await startGateway();
+      ctx.abortController.abort();
+      await task;
       expect(ctx.getStatus().running).toBe(false);
     });
 
     it("abort signal triggers cleanup", async () => {
-      const ctx = makeGatewayCtx();
-      await streamchatPlugin.gateway.startAccount(ctx as never);
+      const { task, ctx } = await startGateway();
       ctx.abortController.abort();
+      await task;
       expect(ctx.getStatus().running).toBe(false);
     });
   });
@@ -453,10 +470,13 @@ describe("streamchatPlugin", () => {
 
   describe("inbound message handling", () => {
     let messageHandler: (event: unknown) => void;
+    let gatewayTask: Promise<void>;
+    let gatewayCtx: ReturnType<typeof makeGatewayCtx>;
 
     beforeEach(async () => {
-      const ctx = makeGatewayCtx();
-      await streamchatPlugin.gateway.startAccount(ctx as never);
+      const { task, ctx } = await startGateway();
+      gatewayTask = task;
+      gatewayCtx = ctx;
 
       // Extract the message.new handler
       const onCall = mockStreamChatClient.on.mock.calls.find(
@@ -1330,40 +1350,34 @@ describe("streamchatPlugin", () => {
 
     // --- stop() removes all listeners ---
 
-    describe("stop removes all new listeners", () => {
-      it("stop() removes message.updated listener", async () => {
-        const ctx = makeGatewayCtx();
-        const { stop } = await streamchatPlugin.gateway.startAccount(
-          ctx as never,
-        );
+    describe("abort removes all new listeners", () => {
+      it("abort removes message.updated listener", async () => {
+        const { task, ctx } = await startGateway();
         mockStreamChatClient.off.mockClear();
-        stop();
+        ctx.abortController.abort();
+        await task;
         expect(mockStreamChatClient.off).toHaveBeenCalledWith(
           "message.updated",
           expect.any(Function),
         );
       });
 
-      it("stop() removes message.deleted listener", async () => {
-        const ctx = makeGatewayCtx();
-        const { stop } = await streamchatPlugin.gateway.startAccount(
-          ctx as never,
-        );
+      it("abort removes message.deleted listener", async () => {
+        const { task, ctx } = await startGateway();
         mockStreamChatClient.off.mockClear();
-        stop();
+        ctx.abortController.abort();
+        await task;
         expect(mockStreamChatClient.off).toHaveBeenCalledWith(
           "message.deleted",
           expect.any(Function),
         );
       });
 
-      it("stop() removes reaction.new and reaction.deleted listeners", async () => {
-        const ctx = makeGatewayCtx();
-        const { stop } = await streamchatPlugin.gateway.startAccount(
-          ctx as never,
-        );
+      it("abort removes reaction.new and reaction.deleted listeners", async () => {
+        const { task, ctx } = await startGateway();
         mockStreamChatClient.off.mockClear();
-        stop();
+        ctx.abortController.abort();
+        await task;
         expect(mockStreamChatClient.off).toHaveBeenCalledWith(
           "reaction.new",
           expect.any(Function),
@@ -1374,13 +1388,11 @@ describe("streamchatPlugin", () => {
         );
       });
 
-      it("stop() removes connection.changed and connection.recovered listeners", async () => {
-        const ctx = makeGatewayCtx();
-        const { stop } = await streamchatPlugin.gateway.startAccount(
-          ctx as never,
-        );
+      it("abort removes connection.changed and connection.recovered listeners", async () => {
+        const { task, ctx } = await startGateway();
         mockStreamChatClient.off.mockClear();
-        stop();
+        ctx.abortController.abort();
+        await task;
         expect(mockStreamChatClient.off).toHaveBeenCalledWith(
           "connection.changed",
           expect.any(Function),
