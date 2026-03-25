@@ -10,7 +10,9 @@
     "openclaw.plugin.json"
   ],
   "scripts": {
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "stream-chat": "^9.19.0",
@@ -19,7 +21,8 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "dotenv": "^17.3.1",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "vitest": "^4.1.1"
   },
   "peerDependencies": {
     "openclaw": ">=2026.2.13"

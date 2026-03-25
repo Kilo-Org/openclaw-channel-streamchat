@@ -26,5 +26,5 @@
     }
   },
   "include": ["index.ts", "src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "scripts"]
+  "exclude": ["node_modules", "dist", "scripts", "**/*.test.ts", "src/test-utils"]
 }

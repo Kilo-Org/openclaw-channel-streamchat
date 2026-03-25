@@ -58,4 +58,13 @@ export class RunContextMap {
     }
     return undefined;
   }
+
+  findByInboundMessageId(messageId: string): RunContext | undefined {
+    for (const ctx of this.map.values()) {
+      if (ctx.inboundMessageId === messageId) {
+        return ctx;
+      }
+    }
+    return undefined;
+  }
 }
