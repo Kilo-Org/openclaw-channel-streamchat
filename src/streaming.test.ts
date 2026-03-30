@@ -38,6 +38,27 @@ describe("StreamingHandler", () => {
     });
   });
 
+  // --- updateClient ---
+
+  describe("updateClient", () => {
+    it("replaces the internal client reference", async () => {
+      const newClient = createMockStreamChatClient() as Record<string, Mock>;
+      handler.updateClient(newClient as never);
+
+      // Start a stream — the new client should be used for partialUpdateMessage
+      const runCtx = makeRunCtx();
+      runContexts.set("run-1", runCtx);
+      await handler.onRunStarted("run-1", channel as never, runCtx);
+      await handler.onTextChunk("run-1", "Hello");
+      await new Promise((r) => setTimeout(r, 10));
+
+      // The new client should receive the partialUpdateMessage call
+      expect(newClient.partialUpdateMessage).toHaveBeenCalled();
+      // The old client should NOT
+      expect(client.partialUpdateMessage).not.toHaveBeenCalled();
+    });
+  });
+
   // --- onRunStarted ---
 
   describe("onRunStarted", () => {

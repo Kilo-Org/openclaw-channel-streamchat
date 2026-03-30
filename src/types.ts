@@ -14,6 +14,8 @@ export interface StreamChatChannelConfig {
   ackReaction?: string;
   doneReaction?: string;
   streamingThrottle?: number;
+  watchdogTimeoutMs?: number;
+  watchdogMaxRetries?: number;
   accounts?: Record<string, StreamChatChannelConfig>;
 }
 
@@ -29,6 +31,8 @@ export interface ResolvedAccount {
   ackReaction: string;
   doneReaction: string;
   streamingThrottle: number;
+  watchdogTimeoutMs: number;
+  watchdogMaxRetries: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,8 +68,13 @@ export type StreamChatChannelPlugin = ChannelPlugin<ResolvedAccount>;
 // Config helpers
 // ---------------------------------------------------------------------------
 
-export function getStreamChatConfig(cfg: OpenClawConfig): StreamChatChannelConfig {
-  return (cfg.channels as Record<string, unknown> | undefined)?.streamchat as StreamChatChannelConfig ?? {};
+export function getStreamChatConfig(
+  cfg: OpenClawConfig,
+): StreamChatChannelConfig {
+  return (
+    ((cfg.channels as Record<string, unknown> | undefined)
+      ?.streamchat as StreamChatChannelConfig) ?? {}
+  );
 }
 
 export function listStreamChatAccountIds(cfg: OpenClawConfig): string[] {
@@ -89,9 +98,7 @@ export function resolveStreamChatAccount(
   const sc = getStreamChatConfig(cfg);
 
   const base: StreamChatChannelConfig =
-    id !== "default" && sc.accounts?.[id]
-      ? { ...sc, ...sc.accounts[id] }
-      : sc;
+    id !== "default" && sc.accounts?.[id] ? { ...sc, ...sc.accounts[id] } : sc;
 
   return {
     accountId: id,
@@ -105,5 +112,7 @@ export function resolveStreamChatAccount(
     ackReaction: base.ackReaction ?? "eyes",
     doneReaction: base.doneReaction ?? "white_check_mark",
     streamingThrottle: base.streamingThrottle ?? 15,
+    watchdogTimeoutMs: base.watchdogTimeoutMs ?? 120_000,
+    watchdogMaxRetries: base.watchdogMaxRetries ?? 0,
   };
 }

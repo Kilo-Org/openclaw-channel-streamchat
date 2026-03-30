@@ -16,13 +16,16 @@ async function safeSendEvent(
   let delay = 100;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      await channel.sendEvent(event as unknown as Parameters<typeof channel.sendEvent>[0]);
+      await channel.sendEvent(
+        event as unknown as Parameters<typeof channel.sendEvent>[0],
+      );
       return;
     } catch (err: unknown) {
       const status =
         (err as { status?: number })?.status ??
         (err as { response?: { status?: number } })?.response?.status;
-      const retryable = status === 429 || (status != null && status >= 500 && status < 600);
+      const retryable =
+        status === 429 || (status != null && status >= 500 && status < 600);
       if (!retryable || attempt === maxAttempts) {
         // Swallow in streaming context to avoid breaking generation flow
         log?.warn?.(
@@ -61,10 +64,21 @@ interface ActiveStream {
 
 export class StreamingHandler {
   private streams = new Map<string, ActiveStream>();
-  private deps: StreamingHandlerDeps;
+  private readonly deps: Omit<StreamingHandlerDeps, "client">;
+  private client: StreamChat;
 
   constructor(deps: StreamingHandlerDeps) {
-    this.deps = deps;
+    this.client = deps.client;
+    const { client: _, ...rest } = deps;
+    this.deps = rest;
+  }
+
+  /**
+   * Replace the StreamChat client reference after a reconnect cycle.
+   * Needed because `chatRuntime.reconnect()` creates a fresh SDK instance.
+   */
+  updateClient(newClient: StreamChat): void {
+    this.client = newClient;
   }
 
   /**
@@ -134,7 +148,7 @@ export class StreamingHandler {
     const stream = this.streams.get(runId);
     if (!stream || stream.finalized) return;
 
-    const { client } = this.deps;
+    const client = this.client;
 
     stream.accumulatedText += chunk;
     stream.chunkCounter++;
@@ -155,8 +169,7 @@ export class StreamingHandler {
     }
 
     // Throttle: early bursts (odd chunks < 8) then every Nth
-    const shouldUpdate =
-      (n < 8 && n % 2 !== 0) || n % streamingThrottle === 0;
+    const shouldUpdate = (n < 8 && n % 2 !== 0) || n % streamingThrottle === 0;
 
     if (shouldUpdate) {
       const text = stream.accumulatedText;
@@ -207,7 +220,8 @@ export class StreamingHandler {
     if (!stream || stream.finalized) return;
     stream.finalized = true;
 
-    const { client, log } = this.deps;
+    const client = this.client;
+    const { log } = this.deps;
 
     // Wait for any in-flight partial updates
     await stream.lastUpdatePromise.catch(() => {});
@@ -244,7 +258,8 @@ export class StreamingHandler {
     if (!stream || stream.finalized) return;
     stream.finalized = true;
 
-    const { client, log } = this.deps;
+    const client = this.client;
+    const { log } = this.deps;
 
     // Wait for any in-flight partial updates
     await stream.lastUpdatePromise.catch(() => {});
@@ -286,7 +301,8 @@ export class StreamingHandler {
     if (!stream || stream.finalized) return;
     stream.finalized = true;
 
-    const { client, log } = this.deps;
+    const client = this.client;
+    const { log } = this.deps;
 
     // Wait for any in-flight partial updates
     await stream.lastUpdatePromise.catch(() => {});
@@ -309,6 +325,16 @@ export class StreamingHandler {
     );
 
     this.streams.delete(runId);
+  }
+
+  /**
+   * Returns all run IDs currently tracked in the streams map.
+   * Note: This may include entries that are mid-finalization (finalized flag
+   * set but not yet deleted). Callers should handle the case where
+   * `onForceStop` / `onRunCompleted` is a no-op for already-finalized entries.
+   */
+  getActiveRunIds(): string[] {
+    return [...this.streams.keys()];
   }
 
   getActiveStream(runId: string): { messageId: string } | undefined {

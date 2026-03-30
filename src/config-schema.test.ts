@@ -16,6 +16,8 @@ describe("StreamChatConfigSchema", () => {
       ackReaction: "eyes",
       doneReaction: "white_check_mark",
       streamingThrottle: 15,
+      watchdogTimeoutMs: 120000,
+      watchdogMaxRetries: 0,
     });
   });
 
@@ -87,6 +89,30 @@ describe("StreamChatConfigSchema", () => {
       ackReaction: "eyes",
       doneReaction: "white_check_mark",
       streamingThrottle: 15,
+      watchdogTimeoutMs: 120000,
+      watchdogMaxRetries: 0,
     });
+  });
+
+  it("accepts custom watchdog values", () => {
+    const result = parse({
+      watchdogTimeoutMs: 60000,
+      watchdogMaxRetries: 10,
+    });
+    expect(result.watchdogTimeoutMs).toBe(60000);
+    expect(result.watchdogMaxRetries).toBe(10);
+  });
+
+  it("rejects watchdogTimeoutMs below 10000", () => {
+    expect(() => parse({ watchdogTimeoutMs: 5000 })).toThrow();
+  });
+
+  it("rejects negative watchdogMaxRetries", () => {
+    expect(() => parse({ watchdogMaxRetries: -1 })).toThrow();
+  });
+
+  it("accepts watchdogMaxRetries of 0 (unlimited)", () => {
+    const result = parse({ watchdogMaxRetries: 0 });
+    expect(result.watchdogMaxRetries).toBe(0);
   });
 });

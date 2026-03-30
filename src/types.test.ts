@@ -94,6 +94,8 @@ describe("resolveStreamChatAccount", () => {
     expect(account.ackReaction).toBe("eyes");
     expect(account.doneReaction).toBe("white_check_mark");
     expect(account.streamingThrottle).toBe(15);
+    expect(account.watchdogTimeoutMs).toBe(120_000);
+    expect(account.watchdogMaxRetries).toBe(0);
   });
 
   it("accountId defaults to 'default' when null", () => {
@@ -167,5 +169,35 @@ describe("resolveStreamChatAccount", () => {
     expect(account.ackReaction).toBe("eyes");
     expect(account.doneReaction).toBe("white_check_mark");
     expect(account.streamingThrottle).toBe(15);
+    expect(account.watchdogTimeoutMs).toBe(120_000);
+    expect(account.watchdogMaxRetries).toBe(0);
+  });
+
+  it("respects custom watchdog config values", () => {
+    const cfg = makeCfg({
+      apiKey: "k1",
+      botUserId: "bot-1",
+      botUserToken: "t1",
+      watchdogTimeoutMs: 60_000,
+      watchdogMaxRetries: 10,
+    });
+    const account = resolveStreamChatAccount(cfg);
+    expect(account.watchdogTimeoutMs).toBe(60_000);
+    expect(account.watchdogMaxRetries).toBe(10);
+  });
+
+  it("named account inherits base watchdog config", () => {
+    const cfg = makeCfg({
+      apiKey: "k1",
+      botUserId: "bot-1",
+      botUserToken: "t1",
+      watchdogTimeoutMs: 30_000,
+      accounts: {
+        sub: { apiKey: "k2", botUserId: "bot-2", botUserToken: "t2" },
+      },
+    });
+    const account = resolveStreamChatAccount(cfg, "sub");
+    expect(account.watchdogTimeoutMs).toBe(30_000);
+    expect(account.watchdogMaxRetries).toBe(0); // default
   });
 });

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Event } from "stream-chat";
+import type { Event, StreamChat } from "stream-chat";
 import type {
   AgentMediaPayload,
   ChannelGatewayContext,
@@ -17,19 +17,30 @@ import { StreamChatClientRuntime } from "./stream-chat-runtime.js";
 import { StreamingHandler } from "./streaming.js";
 import { RunContextMap } from "./run-context.js";
 import { buildEnvelope } from "./envelope.js";
+import { ConnectionWatchdog } from "./connection-watchdog.js";
 import { safeAsync, getEventMessageId, getConnectionOnline } from "./utils.js";
 import type {
   ResolvedAccount,
   StreamChatChannelPlugin,
   RunContext,
 } from "./types.js";
-import {
-  listStreamChatAccountIds,
-  resolveStreamChatAccount,
-} from "./types.js";
+import { listStreamChatAccountIds, resolveStreamChatAccount } from "./types.js";
 
 // Track which threads we've already seen (for first-in-thread detection)
 const seenThreads = new Set<string>();
+
+// Stream Chat error codes that indicate fatal auth failures.
+// When these are received via `connection.error`, the SDK's built-in
+// reconnection will never succeed, so the watchdog should take over.
+// See: https://getstream.io/chat/docs/rest/#error-codes
+const STREAM_ERROR_TOKEN_EXPIRED = 40;
+const STREAM_ERROR_AUTH_FAILED = 2;
+const STREAM_ERROR_TOKEN_INVALID = 43;
+const FATAL_AUTH_ERROR_CODES = new Set([
+  STREAM_ERROR_TOKEN_EXPIRED,
+  STREAM_ERROR_AUTH_FAILED,
+  STREAM_ERROR_TOKEN_INVALID,
+]);
 
 /**
  * Return a promise that resolves when the abort signal fires.
@@ -113,7 +124,9 @@ interface HandleMessageParams {
   log?: ChannelLogSink;
 }
 
-async function handleStreamChatMessage(params: HandleMessageParams): Promise<void> {
+async function handleStreamChatMessage(
+  params: HandleMessageParams,
+): Promise<void> {
   const {
     cfg,
     accountId,
@@ -159,10 +172,9 @@ async function handleStreamChatMessage(params: HandleMessageParams): Promise<voi
     peer: { kind: "channel", id: channelId },
   });
 
-  const storePath = rt.channel.session.resolveStorePath(
-    cfg.session?.store,
-    { agentId: route.agentId },
-  );
+  const storePath = rt.channel.session.resolveStorePath(cfg.session?.store, {
+    agentId: route.agentId,
+  });
 
   // Build envelope with thread/reply context
   let threadParentInfo: {
@@ -175,7 +187,10 @@ async function handleStreamChatMessage(params: HandleMessageParams): Promise<voi
   if (threadParentId) {
     // Try to get the parent message for context
     try {
-      const channel = await chatRuntime.getOrQueryChannel(channelType, channelId);
+      const channel = await chatRuntime.getOrQueryChannel(
+        channelType,
+        channelId,
+      );
       await channel.getReplies(threadParentId, { limit: 0 });
       // The parent message is embedded in the channel messages
       const state = channel.state;
@@ -355,7 +370,10 @@ async function handleStreamChatMessage(params: HandleMessageParams): Promise<voi
   // Pre-create the placeholder message before dispatch so the message ID is
   // available when onPartialReply fires (which is called fire-and-forget by
   // OpenClaw and cannot safely do async work itself).
-  const responseChannel = await chatRuntime.getOrQueryChannel(channelType, channelId);
+  const responseChannel = await chatRuntime.getOrQueryChannel(
+    channelType,
+    channelId,
+  );
   await streamingHandler.onRunStarted(runId, responseChannel, runCtx);
 
   let errorDelivered = false;
@@ -377,7 +395,11 @@ async function handleStreamChatMessage(params: HandleMessageParams): Promise<voi
         const delta = full.slice(lastPartialText.length);
         lastPartialText = full;
         if (delta) {
-          void streamingHandler.onTextChunk(runId, delta, account.streamingThrottle);
+          void streamingHandler.onTextChunk(
+            runId,
+            delta,
+            account.streamingThrottle,
+          );
         }
       },
     },
@@ -406,9 +428,7 @@ async function handleStreamChatMessage(params: HandleMessageParams): Promise<voi
 
           // Text blocks are handled token-by-token via onPartialReply above.
         } catch (err) {
-          log?.error?.(
-            `[StreamChat] Deliver failed: ${String(err)}`,
-          );
+          log?.error?.(`[StreamChat] Deliver failed: ${String(err)}`);
           throw err;
         }
       },
@@ -449,11 +469,7 @@ async function handleStreamChatMessage(params: HandleMessageParams): Promise<voi
   // Mark channel as read to clear unread badges on the bot's side.
   // This runs per-response; the Stream Chat SDK deduplicates markRead calls
   // server-side so repeated calls for the same channel are effectively no-ops.
-  safeAsync(
-    () => responseChannel.markRead(),
-    log,
-    "mark read",
-  );
+  safeAsync(() => responseChannel.markRead(), log, "mark read");
 
   runContexts.delete(runId);
 }
@@ -511,7 +527,8 @@ function handleMessageDeleted(params: {
   cfg: OpenClawConfig;
   accountId: string;
 }): void {
-  const { event, account, runContexts, streamingHandler, log, cfg, accountId } = params;
+  const { event, account, runContexts, streamingHandler, log, cfg, accountId } =
+    params;
   const message = event.message;
   if (!message) return;
   if (event.user?.id === account.botUserId) return;
@@ -708,9 +725,11 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
           // `forceDocument` is an optional extension field on ChannelOutboundContext
           // that some callers set to force file (non-image) attachment behaviour.
           // It is not part of the base SDK type, so we use duck-typing here.
-          const forceDocument = "forceDocument" in ctx && ctx.forceDocument === true;
+          const forceDocument =
+            "forceDocument" in ctx && ctx.forceDocument === true;
           const isImage =
-            (media.contentType?.startsWith("image/") ?? false) && !forceDocument;
+            (media.contentType?.startsWith("image/") ?? false) &&
+            !forceDocument;
 
           // Both sendFile and sendImage accept Buffer on the server side.
           // sendImage's TS types omit Buffer but it works at runtime with
@@ -718,7 +737,8 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
           const uploaded = await channel.sendFile(
             media.buffer,
             media.fileName ?? (isImage ? "image" : "file"),
-            media.contentType ?? (isImage ? "image/jpeg" : "application/octet-stream"),
+            media.contentType ??
+              (isImage ? "image/jpeg" : "application/octet-stream"),
           );
 
           attachments = [
@@ -727,13 +747,9 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
               ...(isImage
                 ? { image_url: uploaded.file }
                 : { asset_url: uploaded.file }),
-              ...(uploaded.thumb_url
-                ? { thumb_url: uploaded.thumb_url }
-                : {}),
+              ...(uploaded.thumb_url ? { thumb_url: uploaded.thumb_url } : {}),
               ...(media.fileName ? { title: media.fileName } : {}),
-              ...(media.contentType
-                ? { mime_type: media.contentType }
-                : {}),
+              ...(media.contentType ? { mime_type: media.contentType } : {}),
             },
           ];
         }
@@ -800,7 +816,6 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
       });
 
       // Listen for new messages
-      const client = chatRuntime.getClient();
       const handleMessage = (event: Event) => {
         handleStreamChatMessage({
           cfg,
@@ -812,9 +827,7 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
           runContexts,
           log,
         }).catch((err) => {
-          log?.error?.(
-            `[StreamChat] Message handler error: ${String(err)}`,
-          );
+          log?.error?.(`[StreamChat] Message handler error: ${String(err)}`);
         });
       };
 
@@ -825,9 +838,7 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
         const activeRun = runContexts.findByResponseMessageId(messageId);
         if (activeRun) {
           streamingHandler.onForceStop(activeRun.runId).catch((err) => {
-            log?.warn?.(
-              `[StreamChat] Force stop error: ${String(err)}`,
-            );
+            log?.warn?.(`[StreamChat] Force stop error: ${String(err)}`);
           });
         }
       };
@@ -852,10 +863,24 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
 
       // Listen for reaction events (Feature: Reaction Events)
       const handleReactionNew = (event: Event) => {
-        handleReactionEvent({ event, account, log, cfg, accountId, action: "added" });
+        handleReactionEvent({
+          event,
+          account,
+          log,
+          cfg,
+          accountId,
+          action: "added",
+        });
       };
       const handleReactionDeleted = (event: Event) => {
-        handleReactionEvent({ event, account, log, cfg, accountId, action: "removed" });
+        handleReactionEvent({
+          event,
+          account,
+          log,
+          cfg,
+          accountId,
+          action: "removed",
+        });
       };
 
       // Listen for connection state changes (Feature: Connection Recovery)
@@ -863,8 +888,10 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
         const online = getConnectionOnline(event);
         if (online) {
           log?.info?.("[StreamChat] Connection restored");
+          watchdog.markOnline();
         } else {
           log?.warn?.("[StreamChat] Connection lost — SDK will auto-reconnect");
+          watchdog.markOffline();
         }
         ctx.setStatus({
           ...ctx.getStatus(),
@@ -874,6 +901,7 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
 
       const handleConnectionRecovered = () => {
         log?.info?.("[StreamChat] Connection recovered — state re-synced");
+        watchdog.markOnline();
         ctx.setStatus({
           ...ctx.getStatus(),
           running: true,
@@ -881,33 +909,145 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
         });
       };
 
-      client.on("message.new", handleMessage);
-      client.on("ai_indicator.stop" as "user.watching.start", handleAiStop);
-      client.on("message.updated", handleMessageUpdate);
-      client.on("message.deleted", handleMessageDelete);
-      client.on("reaction.new", handleReactionNew);
-      client.on("reaction.deleted", handleReactionDeleted);
-      client.on("connection.changed", handleConnectionChanged);
-      client.on("connection.recovered", handleConnectionRecovered);
+      // Listen for connection errors to detect fatal SDK errors immediately.
+      // The `connection.error` event is server-sent via the WebSocket but is
+      // not part of the SDK's typed EVENT_MAP, so its payload shape varies.
+      // We check several possible locations for the Stream error code.
+      const handleConnectionError = (event: Event) => {
+        const raw = event as unknown as Record<string, unknown>;
+        const rawCode =
+          raw.error_code ??
+          (raw.error as Record<string, unknown> | undefined)?.code ??
+          (raw.error as Record<string, unknown> | undefined)?.StatusCode;
+        const errorCode = Number(rawCode);
+        log?.error?.(`[StreamChat] Connection error: code=${rawCode}`);
+        // Fatal auth errors — the SDK's built-in reconnect will never
+        // succeed, so trigger the watchdog immediately.
+        if (FATAL_AUTH_ERROR_CODES.has(errorCode)) {
+          watchdog.markOffline();
+        }
+      };
+
+      // -------------------------------------------------------------------
+      // Event listener bind / unbind / rebind helpers
+      // -------------------------------------------------------------------
+
+      let currentClient = chatRuntime.getClient();
+
+      function bindListeners(c: StreamChat) {
+        c.on("message.new", handleMessage);
+        c.on("ai_indicator.stop" as "user.watching.start", handleAiStop);
+        c.on("message.updated", handleMessageUpdate);
+        c.on("message.deleted", handleMessageDelete);
+        c.on("reaction.new", handleReactionNew);
+        c.on("reaction.deleted", handleReactionDeleted);
+        c.on("connection.changed", handleConnectionChanged);
+        c.on("connection.recovered", handleConnectionRecovered);
+        c.on(
+          "connection.error" as "user.watching.start",
+          handleConnectionError,
+        );
+      }
+
+      function unbindListeners(c: StreamChat) {
+        c.off("message.new", handleMessage);
+        c.off("ai_indicator.stop" as "user.watching.start", handleAiStop);
+        c.off("message.updated", handleMessageUpdate);
+        c.off("message.deleted", handleMessageDelete);
+        c.off("reaction.new", handleReactionNew);
+        c.off("reaction.deleted", handleReactionDeleted);
+        c.off("connection.changed", handleConnectionChanged);
+        c.off("connection.recovered", handleConnectionRecovered);
+        c.off(
+          "connection.error" as "user.watching.start",
+          handleConnectionError,
+        );
+      }
+
+      function rebindListeners(newClient: StreamChat) {
+        unbindListeners(currentClient);
+        bindListeners(newClient);
+        currentClient = newClient;
+      }
+
+      // -------------------------------------------------------------------
+      // Connection Watchdog
+      // -------------------------------------------------------------------
+
+      const watchdog = new ConnectionWatchdog({
+        disconnectTimeoutMs: account.watchdogTimeoutMs,
+        maxReconnectAttempts: account.watchdogMaxRetries,
+        onReconnect: async () => {
+          // Guard: if the gateway was stopped (abort signal) while the
+          // watchdog timer was pending, bail out to avoid reconnecting a
+          // connection that handleAbort is tearing down concurrently.
+          if (stopped) return;
+
+          log?.warn?.("[StreamChat] Watchdog triggering full reconnect cycle");
+
+          // Force-stop all active streaming runs before tearing down the
+          // connection.  Their Channel/client references will be invalid
+          // after reconnect, so finalizing them now avoids silent failures.
+          const activeRunIds = streamingHandler.getActiveRunIds();
+          for (const runId of activeRunIds) {
+            try {
+              await streamingHandler.onForceStop(runId);
+            } catch (err) {
+              log?.warn?.(
+                `[StreamChat] Failed to force-stop run ${runId} before reconnect: ${String(err)}`,
+              );
+            }
+          }
+
+          // Re-check after awaiting force-stops — abort may have fired
+          // while we were cleaning up active runs.
+          if (stopped) return;
+
+          await chatRuntime.reconnect();
+
+          // Re-check after reconnect — abort may have fired during the
+          // async reconnect cycle.  Proceeding would rebind listeners to
+          // a client that handleAbort is disconnecting.
+          if (stopped) return;
+
+          const newClient = chatRuntime.getClient();
+          rebindListeners(newClient);
+          streamingHandler.updateClient(newClient);
+          // Explicitly mark online + update status — connection.changed(online: true)
+          // fires during reconnect() before rebindListeners can catch it on the new client.
+          watchdog.markOnline();
+          ctx.setStatus({
+            ...ctx.getStatus(),
+            running: true,
+            lastError: null,
+          });
+        },
+        onFatalFailure: () => {
+          log?.error?.(
+            "[StreamChat] Watchdog: all reconnect attempts exhausted — giving up",
+          );
+          ctx.setStatus({
+            ...ctx.getStatus(),
+            running: false,
+            lastError:
+              "Connection permanently lost after multiple reconnect attempts",
+          });
+        },
+        log,
+      });
+
+      bindListeners(currentClient);
 
       // Handle abort signal / explicit stop — idempotent via `stopped` guard
       let stopped = false;
       const handleAbort = () => {
         if (stopped) return;
         stopped = true;
-        client.off("message.new", handleMessage);
-        client.off("ai_indicator.stop" as "user.watching.start", handleAiStop);
-        client.off("message.updated", handleMessageUpdate);
-        client.off("message.deleted", handleMessageDelete);
-        client.off("reaction.new", handleReactionNew);
-        client.off("reaction.deleted", handleReactionDeleted);
-        client.off("connection.changed", handleConnectionChanged);
-        client.off("connection.recovered", handleConnectionRecovered);
+        watchdog.dispose();
+        unbindListeners(currentClient);
         activeGatewayCleanup.delete(accountId);
         chatRuntime.stop().catch((err) => {
-          log?.error?.(
-            `[StreamChat] Disconnect error: ${String(err)}`,
-          );
+          log?.error?.(`[StreamChat] Disconnect error: ${String(err)}`);
         });
         ctx.setStatus({
           ...ctx.getStatus(),
@@ -918,9 +1058,7 @@ export const streamchatPlugin: StreamChatChannelPlugin = {
 
       activeGatewayCleanup.set(accountId, handleAbort);
 
-      log?.info?.(
-        `[StreamChat] Gateway started for account "${accountId}"`,
-      );
+      log?.info?.(`[StreamChat] Gateway started for account "${accountId}"`);
 
       // Keep the startAccount promise pending until the framework signals
       // shutdown via the abort signal.  Without this the promise resolves

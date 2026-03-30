@@ -39,6 +39,8 @@ function makeAccount(overrides?: Partial<ResolvedAccount>): ResolvedAccount {
     ackReaction: "eyes",
     doneReaction: "white_check_mark",
     streamingThrottle: 15,
+    watchdogTimeoutMs: 120_000,
+    watchdogMaxRetries: 0,
     ...overrides,
   };
 }
@@ -219,6 +221,73 @@ describe("StreamChatClientRuntime", () => {
       expect(result).toBe(newCh);
       // Should be cached now
       expect(runtime.getChannel("messaging", "new-ch")).toBe(newCh);
+    });
+  });
+
+  describe("reconnect", () => {
+    it("disconnects, creates fresh client, and reconnects", async () => {
+      const runtime = new StreamChatClientRuntime(account);
+      await runtime.start();
+      const oldClient = runtime.getClient();
+
+      mockClient.connectUser.mockClear();
+      mockClient.queryChannels.mockClear();
+      StreamChatSpy.mockClear();
+
+      await runtime.reconnect();
+
+      // Should have created a new StreamChat instance
+      expect(StreamChatSpy).toHaveBeenCalledWith("test-api-key", {
+        allowServerSideConnect: true,
+      });
+      // Should have called connectUser again
+      expect(mockClient.connectUser).toHaveBeenCalled();
+      expect(runtime.isConnected()).toBe(true);
+    });
+
+    it("removes notification.added_to_channel before disconnect", async () => {
+      const runtime = new StreamChatClientRuntime(account);
+      await runtime.start();
+      mockClient.off.mockClear();
+
+      await runtime.reconnect();
+
+      expect(mockClient.off).toHaveBeenCalledWith(
+        "notification.added_to_channel",
+        expect.any(Function),
+      );
+    });
+
+    it("clears channels on reconnect", async () => {
+      const ch = createMockChannel({ type: "messaging", id: "ch-1" });
+      mockClient.queryChannels.mockResolvedValue([ch]);
+      const runtime = new StreamChatClientRuntime(account);
+      await runtime.start();
+      expect(runtime.getChannel("messaging", "ch-1")).toBeDefined();
+
+      // After reconnect, mock returns empty — old channels should be cleared
+      mockClient.queryChannels.mockResolvedValue([]);
+      await runtime.reconnect();
+      expect(runtime.getChannel("messaging", "ch-1")).toBeUndefined();
+    });
+
+    it("swallows disconnect errors gracefully", async () => {
+      const log = {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        debug: vi.fn(),
+      };
+      const runtime = new StreamChatClientRuntime(account, log);
+      await runtime.start();
+
+      mockClient.disconnectUser.mockRejectedValueOnce(new Error("disconnect fail"));
+      // Should not throw
+      await runtime.reconnect();
+      expect(log.warn).toHaveBeenCalledWith(
+        expect.stringContaining("Disconnect during reconnect failed"),
+      );
+      expect(runtime.isConnected()).toBe(true);
     });
   });
 

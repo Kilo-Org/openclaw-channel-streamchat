@@ -126,6 +126,8 @@ function makeAccount(overrides?: Partial<ResolvedAccount>): ResolvedAccount {
     ackReaction: "eyes",
     doneReaction: "white_check_mark",
     streamingThrottle: 15,
+    watchdogTimeoutMs: 120_000,
+    watchdogMaxRetries: 0,
     ...overrides,
   };
 }
@@ -461,6 +463,27 @@ describe("streamchatPlugin", () => {
       ctx.abortController.abort();
       await task;
       expect(ctx.getStatus().running).toBe(false);
+    });
+
+    it("registers connection.error listener", async () => {
+      const { task, ctx } = await startGateway();
+      expect(mockStreamChatClient.on).toHaveBeenCalledWith(
+        "connection.error",
+        expect.any(Function),
+      );
+      ctx.abortController.abort();
+      await task;
+    });
+
+    it("abort removes connection.error listener", async () => {
+      const { task, ctx } = await startGateway();
+      mockStreamChatClient.off.mockClear();
+      ctx.abortController.abort();
+      await task;
+      expect(mockStreamChatClient.off).toHaveBeenCalledWith(
+        "connection.error",
+        expect.any(Function),
+      );
     });
   });
 

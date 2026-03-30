@@ -44,37 +44,87 @@ export class StreamChatClientRuntime {
       this.channels.set(key, ch);
     }
 
-    this.log?.info?.(
-      `[StreamChat] Watching ${channelList.length} channel(s).`,
-    );
+    this.log?.info?.(`[StreamChat] Watching ${channelList.length} channel(s).`);
 
     // Auto-watch new channels the bot is added to
     this.addedToChannelHandler = (event: Event) => {
       if (event.channel) {
-        const ch = this.client.channel(
-          event.channel.type,
-          event.channel.id,
-        );
-        ch.watch().then(() => {
-          const key = `${event.channel!.type}:${event.channel!.id}`;
-          this.channels.set(key, ch);
-          this.log?.info?.(
-            `[StreamChat] Auto-watching new channel ${key}`,
-          );
-        }).catch((err) => {
-          this.log?.error?.(
-            `[StreamChat] Failed to watch channel: ${String(err)}`,
-          );
-        });
+        const ch = this.client.channel(event.channel.type, event.channel.id);
+        ch.watch()
+          .then(() => {
+            const key = `${event.channel!.type}:${event.channel!.id}`;
+            this.channels.set(key, ch);
+            this.log?.info?.(`[StreamChat] Auto-watching new channel ${key}`);
+          })
+          .catch((err) => {
+            this.log?.error?.(
+              `[StreamChat] Failed to watch channel: ${String(err)}`,
+            );
+          });
       }
     };
     this.client.on("notification.added_to_channel", this.addedToChannelHandler);
   }
 
+  /**
+   * Full disconnect + fresh client + reconnect cycle.
+   * Used by the ConnectionWatchdog when the SDK's own reconnection silently fails.
+   *
+   * The method is designed to be "atomic" with respect to `this.client`:
+   * the new SDK instance is only assigned after it has successfully connected.
+   * If `start()` fails, `this.client` still points at the old (disconnected)
+   * instance so that callers holding the reference see a consistent state,
+   * and the error propagates to the watchdog for retry.
+   */
+  async reconnect(): Promise<void> {
+    this.log?.info?.("[StreamChat] Reconnecting...");
+
+    const oldClient = this.client;
+
+    // Tear down existing connection
+    try {
+      if (this.addedToChannelHandler) {
+        oldClient.off(
+          "notification.added_to_channel",
+          this.addedToChannelHandler,
+        );
+        this.addedToChannelHandler = undefined;
+      }
+      await oldClient.disconnectUser();
+    } catch (err) {
+      this.log?.warn?.(
+        `[StreamChat] Disconnect during reconnect failed: ${String(err)}`,
+      );
+    }
+    this.connected = false;
+    this.channels.clear();
+
+    // Create a fresh client to avoid reusing a potentially broken SDK state.
+    // Assign to this.client *before* start() because start() reads this.client.
+    const newClient = new StreamChat(this.account.apiKey, {
+      allowServerSideConnect: true,
+    });
+    this.client = newClient;
+
+    try {
+      // Reconnect with the same credentials
+      await this.start();
+    } catch (err) {
+      // Restore the old client reference so getClient() returns a
+      // consistent (albeit disconnected) instance rather than a
+      // half-initialized one.  The watchdog will retry shortly.
+      this.client = oldClient;
+      throw err;
+    }
+  }
+
   async stop(): Promise<void> {
     if (this.connected) {
       if (this.addedToChannelHandler) {
-        this.client.off("notification.added_to_channel", this.addedToChannelHandler);
+        this.client.off(
+          "notification.added_to_channel",
+          this.addedToChannelHandler,
+        );
         this.addedToChannelHandler = undefined;
       }
       this.log?.info?.(`[StreamChat] Disconnecting...`);
