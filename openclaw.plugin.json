@@ -1,5 +1,5 @@
 {
-  "id": "streamchat",
+  "id": "openclaw-channel-streamchat",
   "channels": ["streamchat"],
   "configSchema": {
     "type": "object",

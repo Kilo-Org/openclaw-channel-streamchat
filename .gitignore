@@ -8,3 +8,4 @@ dist/
 scripts/.env
 !scripts/.env.example
 .kilo/plans
+*.tsbuildinfo

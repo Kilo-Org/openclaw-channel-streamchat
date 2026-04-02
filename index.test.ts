@@ -20,8 +20,8 @@ describe("plugin entry point", () => {
     vi.clearAllMocks();
   });
 
-  it("exports id 'streamchat'", () => {
-    expect(plugin.id).toBe("streamchat");
+  it("exports id 'openclaw-channel-streamchat'", () => {
+    expect(plugin.id).toBe("openclaw-channel-streamchat");
   });
 
   it("exports name 'Stream Chat'", () => {
