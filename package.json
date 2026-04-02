@@ -1,5 +1,5 @@
 {
-  "name": "@wunderchat/openclaw-channel-streamchat",
+  "name": "streamchat",
   "version": "0.1.0",
   "description": "Stream Chat messaging channel plugin for OpenClaw",
   "main": "index.ts",
